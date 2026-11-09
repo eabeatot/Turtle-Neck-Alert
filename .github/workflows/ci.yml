@@ -48,24 +48,107 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, Windows, X64]
     steps:
+      - uses: actions/checkout@v4
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Deploy latest image
+      - name: Pull latest image
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'before' -Encoding utf8
+          Remove-Item -LiteralPath (Join-Path $root 'stop') -Force -ErrorAction SilentlyContinue
+          Remove-Item -LiteralPath (Join-Path $root 'predict.jsonl') -Force -ErrorAction SilentlyContinue
+          $monitor = Join-Path $env:GITHUB_WORKSPACE 'scripts\monitor-predict.ps1'
+          Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$monitor,'-Output',(Join-Path $root 'predict.jsonl'),'-PhaseFile',(Join-Path $root 'phase'),'-StopFile',(Join-Path $root 'stop'))
           docker pull $env:IMAGE
-          docker rm -f turtle-neck-alert 2>$null; if ($LASTEXITCODE -ne 0) { $LASTEXITCODE = 0 }
-          docker run -d --name turtle-neck-alert --restart unless-stopped -p 8000:8000 -v turtle-neck-alert-data:/app/data $env:IMAGE
-      - name: Verify deployed service
+      - name: Start new color
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          for ($i = 0; $i -lt 30; $i++) {
-            try { Invoke-RestMethod http://127.0.0.1:8000/health | ConvertTo-Json -Compress; exit 0 } catch { Start-Sleep -Seconds 2 }
+          $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'
+          $network = 'tna-net'; $volume = 'turtle-neck-alert-data'
+          docker network inspect $network 2>$null; if ($LASTEXITCODE -ne 0) { docker network create $network | Out-Null }
+          $legacy = docker ps -a --filter 'name=^turtle-neck-alert$' --format '{{.Names}}'
+          if ($legacy) { docker rm -f turtle-neck-alert | Out-Null; $forcedBlue = $true } else { $forcedBlue = $false }
+          $configDir = Join-Path $root 'nginx-conf'; New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+          $active = $null
+          if (-not $forcedBlue -and (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) {
+            $conf = Get-Content -Raw (Join-Path $configDir 'default.conf') -ErrorAction SilentlyContinue
+            if ($conf -match 'tna-(blue|green):8000') { $active = $Matches[1] }
           }
-          docker logs turtle-neck-alert
-          exit 1
+          if (-not $active -and -not $forcedBlue) {
+            foreach ($color in @('blue','green')) { if (docker ps --filter "name=^tna-$color$" --format '{{.Names}}') { $active = $color; break } }
+          }
+          if (-not $active) { $active = 'blue' }
+          $new = if ($active -eq 'blue') { 'green' } else { 'blue' }
+          $old = if ($active -eq 'blue') { 'blue' } else { 'green' }
+          $name = "tna-$new"
+          docker rm -f $name 2>$null; if ($LASTEXITCODE -ne 0) { $LASTEXITCODE = 0 }
+          docker run -d --name $name --restart unless-stopped --network $network --network-alias $name -v "${volume}:/app/data" $env:IMAGE | Out-Null
+          @("new=$new","old=$old","config=$configDir") | Set-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
+          Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'during' -Encoding utf8
+      - name: Wait for healthy
+        env:
+          IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
+          $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]; $name = "tna-$new"
+          $healthy = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            $status = docker inspect --format '{{.State.Health.Status}}' $name 2>$null
+            if ($status -eq 'healthy') { $healthy = $true; break }
+            if ($status -eq 'unhealthy') { break }
+            Start-Sleep -Seconds 2
+          }
+          if (-not $healthy) { docker logs $name; docker rm -f $name; throw "new container did not become healthy" }
+          $model = docker exec $name python -c "import urllib.request,json; print(json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))['active_model']['version'])"
+          "model=$model" | Add-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
+      - name: Switch traffic
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
+          $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]; $configDir = ($state | Where-Object { $_ -like 'config=*' }).Substring(7)
+          $conf = "server {`n    listen 8000;`n    location / {`n        proxy_pass http://tna-$new`:8000;`n        proxy_http_version 1.1;`n        proxy_set_header Host `$host;`n        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;`n    }`n}`n"
+          [System.IO.File]::WriteAllText((Join-Path $configDir 'default.conf'), $conf, [System.Text.UTF8Encoding]::new($false))
+          if (-not (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) { docker run -d --name tna-proxy --restart unless-stopped --network tna-net -p 8000:8000 -v "${configDir}:/etc/nginx/conf.d" nginx:alpine | Out-Null; Start-Sleep -Seconds 2 }
+          docker exec tna-proxy nginx -t
+          docker exec tna-proxy nginx -s reload
+          Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'after-switch' -Encoding utf8
+      - name: Stop old color
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
+          $old = ($state | Where-Object { $_ -like 'old=*' }).Split('=')[1]; Start-Sleep -Seconds 5
+          docker rm -f "tna-$old" 2>$null; if ($LASTEXITCODE -ne 0) { $LASTEXITCODE = 0 }
+          Start-Sleep -Seconds 15
+          New-Item -ItemType File -Force -Path (Join-Path $root 'stop') | Out-Null
+      - name: Zero-downtime check
+        env:
+          EXPECTED_APP: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $file = Join-Path $root 'predict.jsonl'
+          for ($i = 0; $i -lt 30 -and -not (Test-Path $file); $i++) { Start-Sleep -Milliseconds 200 }
+          $rows = if (Test-Path $file) { Get-Content $file | Where-Object { $_ } | ConvertFrom-Json } else { @() }
+          $state = Get-Content (Join-Path $root 'state'); $expectedModel = ($state | Where-Object { $_ -like 'model=*' }).Split('=')[1]
+          $summary = @("## Zero-downtime deployment", "", "| 구간 | 요청 | 성공 | 실패 | 응답 버전 |", "|---|---:|---:|---:|---|")
+          $failed = $false
+          foreach ($phase in @('before','during','after-switch')) {
+            $part = @($rows | Where-Object { $_.phase -eq $phase }); $success = @($part | Where-Object { $_.ok -eq $true }); $errors = $part.Count - $success.Count
+            $versions = @($success | ForEach-Object { "$($_.app_version) / $($_.model_version)" } | Sort-Object -Unique) -join '<br>'
+            $summary += "| $phase | $($part.Count) | $($success.Count) | $errors | $versions |"
+            if ($errors -gt 0) { $failed = $true }
+          }
+          $last = @($rows | Select-Object -Last 1)
+          if (-not $last -or -not $last.ok -or $last.app_version -ne $env:EXPECTED_APP -or $last.model_version -ne $expectedModel) { $failed = $true }
+          $summary += ""; $summary += "Expected app: $env:EXPECTED_APP; expected model: $expectedModel"
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          if ($failed) { throw 'zero-downtime verification failed' }

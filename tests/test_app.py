@@ -10,7 +10,10 @@ def test_cycle(tmp_path,monkeypatch):
     assert c.get('/health').status_code==200
     for label,lean in [('good',0),('bad',.5)]: assert c.post('/api/data',json={'label':label,'samples':[pts(lean+i*.01) for i in range(12)]}).status_code==200
     x=c.post('/api/train'); assert x.status_code==200 and x.json()['version']=='v1'
-    assert c.post('/api/predict',json={'points':pts()}).status_code==200
+    prediction = c.post('/api/predict',json={'points':pts()})
+    assert prediction.status_code==200
+    assert prediction.json()['app_version'] == 'dev'
+    assert prediction.json()['model_version'] == 'v1'
     assert c.post('/api/rollback/v1').status_code==200
 def test_empty_rejected(tmp_path,monkeypatch):
     monkeypatch.setenv('POSTURE_DATA_DIR',str(tmp_path)); import importlib, app.ml as ml; importlib.reload(ml); import app.main as main; importlib.reload(main)

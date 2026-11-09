@@ -32,7 +32,7 @@ def predict(x:Predict):
     a=ml.active_model()
     if not a: raise HTTPException(503,"활성 모델이 없습니다. 먼저 데이터를 수집하고 학습하세요")
     try:
-        f=ml.feature_vector(x.points).reshape(1,-1); m=a[1]; probs=m.predict_proba(f)[0]; i=int(m.classes_.tolist().index(m.predict(f)[0])); return {"label":str(m.predict(f)[0]),"confidence":float(probs[i])}
+        f=ml.feature_vector(x.points).reshape(1,-1); m=a[1]; probs=m.predict_proba(f)[0]; i=int(m.classes_.tolist().index(m.predict(f)[0])); return {"label":str(m.predict(f)[0]),"confidence":float(probs[i]),"app_version":os.getenv("COMMIT_SHA", "dev"),"model_version":a[0]["version"]}
     except Exception as e: raise HTTPException(400,str(e))
 @app.post("/api/rollback/{version}")
 def rollback(version:str):
