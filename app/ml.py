@@ -13,6 +13,19 @@ ROOT = Path(os.getenv("POSTURE_DATA_DIR", "data")); ROOT.mkdir(exist_ok=True)
 DATA = ROOT / "samples.jsonl"; MODELS = ROOT / "models"; MODELS.mkdir(exist_ok=True)
 ACTIVE = ROOT / "active.json"
 MIN_ACCURACY = 0.70
+DEFAULT_MODELS = Path(__file__).resolve().parents[1] / "data" / "models"
+
+def ensure_default_model():
+    if ACTIVE.exists() or not (DEFAULT_MODELS / "v1.joblib").exists(): return
+    import shutil
+    MODELS.mkdir(parents=True, exist_ok=True)
+    for name in ("v1.joblib", "v1.metrics.json"):
+        source, target = DEFAULT_MODELS / name, MODELS / name
+        if source.exists() and not target.exists(): shutil.copy2(source, target)
+    if (MODELS / "v1.joblib").exists():
+        ACTIVE.write_text(json.dumps({"version":"v1","accuracy":1.0}), encoding="utf8")
+
+ensure_default_model()
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def feature_vector(points):
