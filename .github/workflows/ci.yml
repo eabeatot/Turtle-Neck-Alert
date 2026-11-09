@@ -77,11 +77,15 @@ jobs:
           docker network inspect $network 2>$null; if ($LASTEXITCODE -ne 0) { docker network create $network | Out-Null }
           $legacy = docker ps -a --filter 'name=^turtle-neck-alert$' --format '{{.Names}}'
           if ($legacy) { docker rm -f turtle-neck-alert | Out-Null; $forcedBlue = $true } else { $forcedBlue = $false }
-          $configDir = Join-Path $root 'nginx-conf'; New-Item -ItemType Directory -Force -Path $configDir | Out-Null
           $active = $null
           if (-not $forcedBlue -and (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) {
-            $conf = Get-Content -Raw (Join-Path $configDir 'default.conf') -ErrorAction SilentlyContinue
+            $conf = docker exec tna-proxy cat /etc/nginx/conf.d/default.conf 2>$null
             if ($conf -match 'tna-(blue|green):8000') { $active = $Matches[1] }
+            $mounts = docker inspect tna-proxy | ConvertFrom-Json
+            $bindMount = @($mounts[0].Mounts | Where-Object { $_.Type -eq 'bind' -and $_.Destination -eq '/etc/nginx/conf.d' })
+            if ($bindMount.Count -gt 0) { docker rm -f tna-proxy | Out-Null; $recreateProxy = $true } else { $recreateProxy = $false }
+          } else {
+            $recreateProxy = $false
           }
           if (-not $active -and -not $forcedBlue) {
             foreach ($color in @('blue','green')) { if (docker ps --filter "name=^tna-$color$" --format '{{.Names}}') { $active = $color; break } }
@@ -92,7 +96,7 @@ jobs:
           $name = "tna-$new"
           docker rm -f $name 2>$null; if ($LASTEXITCODE -ne 0) { $LASTEXITCODE = 0 }
           docker run -d --name $name --restart unless-stopped --network $network --network-alias $name -v "${volume}:/app/data" $env:IMAGE | Out-Null
-          @("new=$new","old=$old","config=$configDir") | Set-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
+          @("new=$new","old=$old","recreateProxy=$recreateProxy") | Set-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'during' -Encoding utf8
       - name: Wait for healthy
         env:
@@ -115,10 +119,15 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
-          $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]; $configDir = ($state | Where-Object { $_ -like 'config=*' }).Substring(7)
+          $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]
           $conf = "server {`n    listen 8000;`n    location / {`n        proxy_pass http://tna-$new`:8000;`n        proxy_http_version 1.1;`n        proxy_set_header Host `$host;`n        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;`n    }`n}`n"
-          [System.IO.File]::WriteAllText((Join-Path $configDir 'default.conf'), $conf, [System.Text.UTF8Encoding]::new($false))
-          if (-not (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) { docker run -d --name tna-proxy --restart unless-stopped --network tna-net -p 8000:8000 -v "${configDir}:/etc/nginx/conf.d" nginx:alpine | Out-Null; Start-Sleep -Seconds 2 }
+          $configFile = Join-Path $root 'default.conf'; [System.IO.File]::WriteAllText($configFile, $conf, [System.Text.UTF8Encoding]::new($false))
+          if (-not (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) {
+            docker run -d --name tna-proxy --restart unless-stopped --network tna-net -p 8000:8000 nginx:alpine | Out-Null
+            Start-Sleep -Seconds 2
+            docker cp (Join-Path $env:GITHUB_WORKSPACE 'nginx\default.conf') tna-proxy:/etc/nginx/conf.d/default.conf
+          }
+          docker cp $configFile tna-proxy:/etc/nginx/conf.d/default.conf
           docker exec tna-proxy nginx -t
           docker exec tna-proxy nginx -s reload
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'after-switch' -Encoding utf8
