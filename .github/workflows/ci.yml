@@ -186,7 +186,7 @@ jobs:
           for ($i = 0; $i -lt 30 -and -not (Test-Path $file); $i++) { Start-Sleep -Milliseconds 200 }
           $rows = if (Test-Path $file) { Get-Content $file | Where-Object { $_ } | ConvertFrom-Json } else { @() }
           $state = Get-Content (Join-Path $root 'state'); $expectedModel = ($state | Where-Object { $_ -like 'model=*' }).Split('=')[1]
-          $summary = @("## Zero-downtime deployment", "", "| 구간 | 요청 | 성공 | 실패 | 응답 버전 |", "|---|---:|---:|---:|---|")
+          $summary = @("## Zero-downtime deployment", "", "| Phase | Requests | Success | Failed | App version / Model |", "|---|---:|---:|---:|---|")
           $failed = $false
           foreach ($phase in @('before','during','after-switch')) {
             $part = @($rows | Where-Object { $_.phase -eq $phase }); $success = @($part | Where-Object { $_.ok -eq $true }); $errors = $part.Count - $success.Count
@@ -196,6 +196,16 @@ jobs:
           }
           $last = @($rows | Select-Object -Last 1)
           if (-not $last -or -not $last.ok -or $last.app_version -ne $env:EXPECTED_APP -or $last.model_version -ne $expectedModel) { $failed = $true }
+          $all = @($rows); $allOk = @($all | Where-Object { $_.ok -eq $true }).Count; $allFail = $all.Count - $allOk
+          $summary += "| **total** | **$($all.Count)** | **$allOk** | **$allFail** | |"
+          $first = @($all | Where-Object { $_.ok -eq $true } | Select-Object -First 1)
+          $lastOk = @($all | Where-Object { $_.ok -eq $true } | Select-Object -Last 1)
+          $summary += ""
+          if ($first -and $lastOk) {
+            $summary += "**Version change:** model **$($first[0].model_version)** (app $($first[0].app_version -replace '^(.{7}).*','$1')) -> model **$($lastOk[0].model_version)** (app $($lastOk[0].app_version -replace '^(.{7}).*','$1'))"
+          }
           $summary += ""; $summary += "Expected app: $env:EXPECTED_APP; expected model: $expectedModel"
+          $summary += ""
+          if ($failed) { $summary += "**Result: FAIL**" } else { $summary += "**Result: PASS** - all $($all.Count) requests before/during/after redeploy succeeded and traffic switched to the new version" }
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8
           if ($failed) { throw 'zero-downtime verification failed' }
