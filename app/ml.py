@@ -25,8 +25,6 @@ def ensure_default_model():
     if (MODELS / "v1.joblib").exists():
         ACTIVE.write_text(json.dumps({"version":"v1","accuracy":1.0}), encoding="utf8")
 
-ensure_default_model()
-
 def now(): return datetime.now(timezone.utc).isoformat()
 def feature_vector(points):
     """MediaPipe landmark list/dict -> shoulder-normalized x,y,z + head/neck features."""
