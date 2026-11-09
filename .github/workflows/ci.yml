@@ -66,7 +66,8 @@ jobs:
           Remove-Item -LiteralPath (Join-Path $root 'predict.jsonl') -Force -ErrorAction SilentlyContinue
           $monitor = Join-Path $env:GITHUB_WORKSPACE 'scripts\monitor-predict.ps1'
           Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',$monitor,'-Output',(Join-Path $root 'predict.jsonl'),'-PhaseFile',(Join-Path $root 'phase'),'-StopFile',(Join-Path $root 'stop'))
-          docker pull $env:IMAGE
+          $pullOutput = @(docker pull $env:IMAGE 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "docker pull failed: $($pullOutput -join ' ')" }
       - name: Start new color
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
@@ -74,16 +75,33 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'
           $network = 'tna-net'; $volume = 'turtle-neck-alert-data'
-          docker network inspect $network 2>$null; if ($LASTEXITCODE -ne 0) { docker network create $network | Out-Null }
+          $networkExists = @(docker network ls --filter "name=^$network$" --format '{{.Name}}' 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "cannot list Docker networks: $($networkExists -join ' ')" }
+          if ($networkExists.Count -eq 0) {
+            $networkOutput = @(docker network create $network 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "docker network create failed: $($networkOutput -join ' ')" }
+          }
           $legacy = docker ps -a --filter 'name=^turtle-neck-alert$' --format '{{.Names}}'
-          if ($legacy) { docker rm -f turtle-neck-alert | Out-Null; $forcedBlue = $true } else { $forcedBlue = $false }
+          if ($legacy) {
+            $removeOutput = @(docker rm -f turtle-neck-alert 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot remove legacy container: $($removeOutput -join ' ')" }
+            $forcedBlue = $true
+          } else { $forcedBlue = $false }
           $active = $null
           if (-not $forcedBlue -and (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) {
-            $conf = docker exec tna-proxy cat /etc/nginx/conf.d/default.conf 2>$null
+            $confOutput = @(docker exec tna-proxy cat /etc/nginx/conf.d/default.conf 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot read proxy config: $($confOutput -join ' ')" }
+            $conf = $confOutput -join "`n"
             if ($conf -match 'tna-(blue|green):8000') { $active = $Matches[1] }
-            $mounts = docker inspect tna-proxy | ConvertFrom-Json
+            $inspectOutput = @(docker inspect tna-proxy 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot inspect proxy: $($inspectOutput -join ' ')" }
+            $mounts = $inspectOutput -join "`n" | ConvertFrom-Json
             $bindMount = @($mounts[0].Mounts | Where-Object { $_.Type -eq 'bind' -and $_.Destination -eq '/etc/nginx/conf.d' })
-            if ($bindMount.Count -gt 0) { docker rm -f tna-proxy | Out-Null; $recreateProxy = $true } else { $recreateProxy = $false }
+            if ($bindMount.Count -gt 0) {
+              $removeOutput = @(docker rm -f tna-proxy 2>&1)
+              if ($LASTEXITCODE -ne 0) { throw "cannot recreate proxy: $($removeOutput -join ' ')" }
+              $recreateProxy = $true
+            } else { $recreateProxy = $false }
           } else {
             $recreateProxy = $false
           }
@@ -94,8 +112,13 @@ jobs:
           $new = if ($active -eq 'blue') { 'green' } else { 'blue' }
           $old = if ($active -eq 'blue') { 'blue' } else { 'green' }
           $name = "tna-$new"
-          docker rm -f $name 2>$null; if ($LASTEXITCODE -ne 0) { $LASTEXITCODE = 0 }
-          docker run -d --name $name --restart unless-stopped --network $network --network-alias $name -v "${volume}:/app/data" $env:IMAGE | Out-Null
+          $existingNew = @(docker ps -a --filter "name=^$name$" --format '{{.Names}}')
+          if ($existingNew.Count -gt 0) {
+            $removeOutput = @(docker rm -f $name 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot remove old $name: $($removeOutput -join ' ')" }
+          }
+          $runOutput = @(docker run -d --name $name --restart unless-stopped --network $network --network-alias $name -v "${volume}:/app/data" $env:IMAGE 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "cannot start $name: $($runOutput -join ' ')" }
           @("new=$new","old=$old","recreateProxy=$recreateProxy") | Set-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'during' -Encoding utf8
       - name: Wait for healthy
@@ -107,13 +130,19 @@ jobs:
           $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]; $name = "tna-$new"
           $healthy = $false
           for ($i = 0; $i -lt 60; $i++) {
-            $status = docker inspect --format '{{.State.Health.Status}}' $name 2>$null
+            $statusOutput = @(docker inspect --format '{{.State.Health.Status}}' $name 2>&1)
+            if ($LASTEXITCODE -ne 0) { $status = 'missing' } else { $status = ($statusOutput -join '').Trim() }
             if ($status -eq 'healthy') { $healthy = $true; break }
             if ($status -eq 'unhealthy') { break }
             Start-Sleep -Seconds 2
           }
-          if (-not $healthy) { docker logs $name; docker rm -f $name; throw "new container did not become healthy" }
-          $model = docker exec $name python -c "import urllib.request,json; print(json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))['active_model']['version'])"
+          if (-not $healthy) {
+            $logs = @(docker logs $name 2>&1); $removeOutput = @(docker rm -f $name 2>&1)
+            throw "new container did not become healthy: $($logs -join ' ')"
+          }
+          $modelOutput = @(docker exec $name python -c "import urllib.request,json; print(json.load(urllib.request.urlopen('http://127.0.0.1:8000/health'))['active_model']['version'])" 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "cannot read model version: $($modelOutput -join ' ')" }
+          $model = ($modelOutput -join '').Trim()
           "model=$model" | Add-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
       - name: Switch traffic
         run: |
@@ -123,20 +152,29 @@ jobs:
           $conf = "server {`n    listen 8000;`n    location / {`n        proxy_pass http://tna-$new`:8000;`n        proxy_http_version 1.1;`n        proxy_set_header Host `$host;`n        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;`n    }`n}`n"
           $configFile = Join-Path $root 'default.conf'; [System.IO.File]::WriteAllText($configFile, $conf, [System.Text.UTF8Encoding]::new($false))
           if (-not (docker ps --filter 'name=^tna-proxy$' --format '{{.Names}}')) {
-            docker run -d --name tna-proxy --restart unless-stopped --network tna-net -p 8000:8000 nginx:alpine | Out-Null
+            $proxyOutput = @(docker run -d --name tna-proxy --restart unless-stopped --network tna-net -p 8000:8000 nginx:alpine 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot start proxy: $($proxyOutput -join ' ')" }
             Start-Sleep -Seconds 2
-            docker cp (Join-Path $env:GITHUB_WORKSPACE 'nginx\default.conf') tna-proxy:/etc/nginx/conf.d/default.conf
+            $copyOutput = @(docker cp (Join-Path $env:GITHUB_WORKSPACE 'nginx\default.conf') tna-proxy:/etc/nginx/conf.d/default.conf 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot copy initial proxy config: $($copyOutput -join ' ')" }
           }
-          docker cp $configFile tna-proxy:/etc/nginx/conf.d/default.conf
-          docker exec tna-proxy nginx -t
-          docker exec tna-proxy nginx -s reload
+          $copyOutput = @(docker cp $configFile tna-proxy:/etc/nginx/conf.d/default.conf 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "cannot copy proxy config: $($copyOutput -join ' ')" }
+          $testOutput = @(docker exec tna-proxy nginx -t 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "nginx config test failed: $($testOutput -join ' ')" }
+          $reloadOutput = @(docker exec tna-proxy nginx -s reload 2>&1)
+          if ($LASTEXITCODE -ne 0) { throw "nginx reload failed: $($reloadOutput -join ' ')" }
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'after-switch' -Encoding utf8
       - name: Stop old color
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
           $old = ($state | Where-Object { $_ -like 'old=*' }).Split('=')[1]; Start-Sleep -Seconds 5
-          docker rm -f "tna-$old" 2>$null; if ($LASTEXITCODE -ne 0) { $LASTEXITCODE = 0 }
+          $oldName = "tna-$old"; $existingOld = @(docker ps -a --filter "name=^$oldName$" --format '{{.Names}}')
+          if ($existingOld.Count -gt 0) {
+            $removeOutput = @(docker rm -f $oldName 2>&1)
+            if ($LASTEXITCODE -ne 0) { throw "cannot remove $oldName: $($removeOutput -join ' ')" }
+          }
           Start-Sleep -Seconds 15
           New-Item -ItemType File -Force -Path (Join-Path $root 'stop') | Out-Null
       - name: Zero-downtime check
