@@ -13,17 +13,39 @@ ROOT = Path(os.getenv("POSTURE_DATA_DIR", "data")); ROOT.mkdir(exist_ok=True)
 DATA = ROOT / "samples.jsonl"; MODELS = ROOT / "models"; MODELS.mkdir(exist_ok=True)
 ACTIVE = ROOT / "active.json"
 MIN_ACCURACY = 0.70
-DEFAULT_MODELS = Path(__file__).resolve().parents[1] / "data" / "models"
+IMAGE_MODELS = Path(os.getenv("POSTURE_IMAGE_MODELS_DIR", str(Path(__file__).resolve().parents[1] / "models")))
 
 def ensure_default_model():
-    if ACTIVE.exists() or not (DEFAULT_MODELS / "v1.joblib").exists(): return
     import shutil
     MODELS.mkdir(parents=True, exist_ok=True)
-    for name in ("v1.joblib", "v1.metrics.json"):
-        source, target = DEFAULT_MODELS / name, MODELS / name
-        if source.exists() and not target.exists(): shutil.copy2(source, target)
-    if (MODELS / "v1.joblib").exists():
-        ACTIVE.write_text(json.dumps({"version":"v1","accuracy":1.0}), encoding="utf8")
+    for source in IMAGE_MODELS.glob("v*.joblib"):
+        version = source.stem
+        target = MODELS / source.name
+        if not target.exists():
+            shutil.copy2(source, target)
+        metrics = IMAGE_MODELS / f"{version}.metrics.json"
+        if metrics.exists() and not (MODELS / metrics.name).exists():
+            shutil.copy2(metrics, MODELS / metrics.name)
+
+    default_file = IMAGE_MODELS / "active.json"
+    if not default_file.exists():
+        return
+    default = json.loads(default_file.read_text(encoding="utf8"))
+    version = default["version"]
+    if not (MODELS / f"{version}.joblib").exists():
+        return
+    current = json.loads(ACTIVE.read_text(encoding="utf8")) if ACTIVE.exists() else None
+    previous_image_default = current.get("image_default_version") if current else None
+    # Old active.json files predate the marker; their active version is the
+    # last image default, so a changed image default is still detected.
+    if previous_image_default is None and current:
+        previous_image_default = current.get("version")
+    if current is None or previous_image_default != version:
+        metrics_path = MODELS / f"{version}.metrics.json"
+        metrics = json.loads(metrics_path.read_text(encoding="utf8")) if metrics_path.exists() else {}
+        current = {"version": version, "accuracy": metrics.get("accuracy", default.get("accuracy", 0.0))}
+    current["image_default_version"] = version
+    ACTIVE.write_text(json.dumps(current, ensure_ascii=False), encoding="utf8")
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def feature_vector(points):
