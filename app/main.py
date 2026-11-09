@@ -1,5 +1,4 @@
 from pathlib import Path
-import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,7 +13,7 @@ def index(): return FileResponse("app/static/index.html")
 def favicon(): return FileResponse("app/static/favicon.svg", media_type="image/svg+xml")
 @app.get("/health")
 def health():
-    a=ml.active_model(); rows=ml.read_rows(); return {"status":"ok","version":os.getenv("COMMIT_SHA", "dev"),"active_model":a[0] if a else None,"samples":len(rows),"label_counts":{"good":sum(r.get("label")=="good" for r in rows),"bad":sum(r.get("label")=="bad" for r in rows)}}
+    a=ml.active_model(); rows=ml.read_rows(); return {"status":"ok","active_model":a[0] if a else None,"samples":len(rows),"label_counts":{"good":sum(r.get("label")=="good" for r in rows),"bad":sum(r.get("label")=="bad" for r in rows)}}
 @app.post("/api/data")
 def data(x:Samples):
     try:return ml.save_samples(x.label,x.samples)

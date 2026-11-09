@@ -3,13 +3,6 @@ __pycache__/
 .pytest_cache/
 .pytest-tmp/
 data/
-!data/
-data/*
-!data/models/
-data/models/*
-!data/models/v1.joblib
-!data/models/v1.metrics.json
-!data/active.json
 *.log
 .env
 .venv/
