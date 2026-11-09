@@ -14,4 +14,5 @@ data/models/*
 .env
 .venv/
 venv/
+actions-runner/
 secrets.*
