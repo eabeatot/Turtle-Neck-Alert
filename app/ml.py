@@ -46,6 +46,7 @@ def ensure_default_model():
         current = {"version": version, "accuracy": metrics.get("accuracy", default.get("accuracy", 0.0))}
     current["image_default_version"] = version
     ACTIVE.write_text(json.dumps(current, ensure_ascii=False), encoding="utf8")
+    reload_active()
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def feature_vector(points):
@@ -85,16 +86,30 @@ def train_model():
         metrics["activated"]=True; ACTIVE.write_text(json.dumps({"version":metrics["version"],"accuracy":acc},ensure_ascii=False),encoding="utf8")
     else: metrics["reason"]=f"검증 게이트 미통과: 정확도 {acc:.3f}, 기준/현재 모델 {max(MIN_ACCURACY,old):.3f}"
     (MODELS/f"v{version}.metrics.json").write_text(json.dumps(metrics,ensure_ascii=False,indent=2),encoding="utf8")
+    reload_active()
     return metrics
 
-def active_model():
+# 무중단 배포: blue/green 두 컨테이너가 같은 data 볼륨(active.json)을 공유한다.
+# 새 컨테이너가 시작하며 active.json을 새 모델로 바꿔도, 트래픽 전환 전까지 요청을 받는 기존 컨테이너는
+# 자기가 띄울 때 불러온 모델을 계속 써야 한다. 그래서 활성 모델은 프로세스 안에 고정(캐시)하고,
+# 이 프로세스가 직접 학습·롤백·삭제했을 때만 다시 읽는다.
+_CURRENT = None
+
+def _load_active():
     if not ACTIVE.exists(): return None
     a=json.loads(ACTIVE.read_text()); path=MODELS/f"{a['version']}.joblib"
     return (a,joblib.load(path)) if path.exists() else None
+
+def reload_active():
+    global _CURRENT
+    _CURRENT=_load_active(); return _CURRENT
+
+def active_model():
+    return _CURRENT if _CURRENT is not None else reload_active()
 def activate(version):
     m=MODELS/f"{version}.metrics.json"
     if not m.exists(): raise ValueError("존재하지 않는 모델 버전입니다")
-    x=json.loads(m.read_text()); ACTIVE.write_text(json.dumps({"version":version,"accuracy":x["accuracy"]}),encoding="utf8"); return x
+    x=json.loads(m.read_text()); ACTIVE.write_text(json.dumps({"version":version,"accuracy":x["accuracy"]}),encoding="utf8"); reload_active(); return x
 
 def delete_data():
     if DATA.exists(): DATA.unlink()
@@ -104,4 +119,5 @@ def delete_models():
     for p in MODELS.glob("v*"):
         if p.is_file(): p.unlink()
     if ACTIVE.exists(): ACTIVE.unlink()
+    reload_active()
     return {"deleted":"models"}

@@ -45,3 +45,19 @@ def test_image_default_updates_existing_volume_without_deleting_user_data(tmp_pa
     assert (ml.MODELS / 'v1.joblib').exists()
     assert (ml.MODELS / 'v2.joblib').exists()
     assert ml.DATA.read_text(encoding='utf8') == '{"label":"good"}\n'
+
+def test_running_container_keeps_its_model_when_shared_volume_changes(tmp_path, monkeypatch):
+    """blue-green 교체 중 새 컨테이너가 공유 볼륨의 active.json을 바꿔도 기존 컨테이너는 자기 모델로 계속 응답해야 한다."""
+    data = tmp_path / 'data'; (data / 'models').mkdir(parents=True)
+    source = __import__('pathlib').Path(__file__).parents[1] / 'models'
+    shutil.copy2(source / 'v1.joblib', data / 'models' / 'v1.joblib')
+    (data / 'active.json').write_text(json.dumps({'version':'v1','accuracy':1.0}), encoding='utf8')
+    monkeypatch.setenv('POSTURE_DATA_DIR', str(data))
+    import importlib, app.ml as ml; importlib.reload(ml); import app.main as main; importlib.reload(main)
+    c = TestClient(main.app)
+    assert c.post('/api/predict', json={'points':pts()}).json()['model_version'] == 'v1'
+    # 다른 컨테이너가 공유 볼륨을 새 모델로 바꾼 상황 (기존 이미지가 못 읽는 모델 파일이라고 가정)
+    (data / 'models' / 'v9.joblib').write_bytes(b'not a model for this image')
+    (data / 'active.json').write_text(json.dumps({'version':'v9','accuracy':1.0}), encoding='utf8')
+    r = c.post('/api/predict', json={'points':pts()})
+    assert r.status_code == 200 and r.json()['model_version'] == 'v1'
