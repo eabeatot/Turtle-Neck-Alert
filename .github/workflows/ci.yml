@@ -58,7 +58,7 @@ jobs:
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'
           New-Item -ItemType Directory -Force -Path $root | Out-Null
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'before' -Encoding utf8
@@ -72,7 +72,7 @@ jobs:
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'
           $network = 'tna-net'; $volume = 'turtle-neck-alert-data'
           $networkExists = @(docker network ls --filter "name=^$network$" --format '{{.Name}}' 2>&1)
@@ -115,17 +115,17 @@ jobs:
           $existingNew = @(docker ps -a --filter "name=^$name$" --format '{{.Names}}')
           if ($existingNew.Count -gt 0) {
             $removeOutput = @(docker rm -f $name 2>&1)
-            if ($LASTEXITCODE -ne 0) { throw "cannot remove old $name: $($removeOutput -join ' ')" }
+            if ($LASTEXITCODE -ne 0) { throw "cannot remove old ${name}: $($removeOutput -join ' ')" }
           }
           $runOutput = @(docker run -d --name $name --restart unless-stopped --network $network --network-alias $name -v "${volume}:/app/data" $env:IMAGE 2>&1)
-          if ($LASTEXITCODE -ne 0) { throw "cannot start $name: $($runOutput -join ' ')" }
+          if ($LASTEXITCODE -ne 0) { throw "cannot start ${name}: $($runOutput -join ' ')" }
           @("new=$new","old=$old","recreateProxy=$recreateProxy") | Set-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'during' -Encoding utf8
       - name: Wait for healthy
         env:
           IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/turtle-neck-alert:${{ github.sha }}
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
           $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]; $name = "tna-$new"
           $healthy = $false
@@ -146,7 +146,7 @@ jobs:
           "model=$model" | Add-Content -LiteralPath (Join-Path $root 'state') -Encoding utf8
       - name: Switch traffic
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
           $new = ($state | Where-Object { $_ -like 'new=*' }).Split('=')[1]
           $conf = "server {`n    listen 8000;`n    location / {`n        proxy_pass http://tna-$new`:8000;`n        proxy_http_version 1.1;`n        proxy_set_header Host `$host;`n        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;`n    }`n}`n"
@@ -167,13 +167,13 @@ jobs:
           Set-Content -LiteralPath (Join-Path $root 'phase') -Value 'after-switch' -Encoding utf8
       - name: Stop old color
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $root = Join-Path $env:RUNNER_TEMP 'tna-blue-green'; $state = Get-Content (Join-Path $root 'state')
           $old = ($state | Where-Object { $_ -like 'old=*' }).Split('=')[1]; Start-Sleep -Seconds 5
           $oldName = "tna-$old"; $existingOld = @(docker ps -a --filter "name=^$oldName$" --format '{{.Names}}')
           if ($existingOld.Count -gt 0) {
             $removeOutput = @(docker rm -f $oldName 2>&1)
-            if ($LASTEXITCODE -ne 0) { throw "cannot remove $oldName: $($removeOutput -join ' ')" }
+            if ($LASTEXITCODE -ne 0) { throw "cannot remove ${oldName}: $($removeOutput -join ' ')" }
           }
           Start-Sleep -Seconds 15
           New-Item -ItemType File -Force -Path (Join-Path $root 'stop') | Out-Null
