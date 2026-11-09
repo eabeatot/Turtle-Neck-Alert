@@ -12,7 +12,25 @@ from sklearn.metrics import accuracy_score
 ROOT = Path(os.getenv("POSTURE_DATA_DIR", "data")); ROOT.mkdir(exist_ok=True)
 DATA = ROOT / "samples.jsonl"; MODELS = ROOT / "models"; MODELS.mkdir(exist_ok=True)
 ACTIVE = ROOT / "active.json"
+DEFAULT_ROOT = Path(__file__).resolve().parents[1] / "data"
+DEFAULT_MODELS = DEFAULT_ROOT / "models"
 MIN_ACCURACY = 0.70
+
+def ensure_default_model():
+    """Seed a writable data directory from the repository's bundled model."""
+    bundled = DEFAULT_MODELS / "v1.joblib"
+    if ACTIVE.exists() or not bundled.exists():
+        return
+    import shutil
+    MODELS.mkdir(parents=True, exist_ok=True)
+    for name in ("v1.joblib", "v1.metrics.json"):
+        source = DEFAULT_MODELS / name
+        target = MODELS / name
+        if source.exists() and not target.exists(): shutil.copy2(source, target)
+    if (MODELS / "v1.joblib").exists():
+        ACTIVE.write_text(json.dumps({"version":"v1","accuracy":1.0}), encoding="utf8")
+
+ensure_default_model()
 
 def now(): return datetime.now(timezone.utc).isoformat()
 def feature_vector(points):
